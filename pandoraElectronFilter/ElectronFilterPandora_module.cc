@@ -26,6 +26,7 @@
 #include "lardataobj/RecoBase/OpFlash.h"
 #include "larcore/Geometry/Geometry.h"
 #include "lardataobj/RawData/TriggerData.h"
+#include "lardataobj/AnalysisBase/Calorimetry.h"
 
 #include "lardataobj/RecoBase/PFParticle.h"
 #include "lardataobj/RecoBase/Vertex.h"
@@ -92,10 +93,11 @@ private:
     double m_absoluteflashdist;
 
     bool is_fiducial(double x[3]) const;
-    void spacepointchargecollector(size_t ipf, std::map< art::Ptr<recob::SpacePoint>, double > & map_spacepoint_weight,const std::vector<recob::PFParticle> & pfparticles,art::Event & evt);
-    void chargecentrePFP(size_t ipf, std::vector<double> & chargecenter,const std::vector<recob::PFParticle> & pfparticles,art::Event & evt);
-    bool opticalfilter(size_t ipf, const std::vector<recob::PFParticle> & pfparticles,art::Event & evt);
+    void spacepointchargecollector(size_t ipf, std::map< art::Ptr<recob::SpacePoint>, double > & map_spacepoint_weight,const std::vector<recob::PFParticle> & pfparticles,const art::Event & evt);
+    void chargecentrePFP(size_t ipf, std::vector<double> & chargecenter,const std::vector<recob::PFParticle> & pfparticles,const art::Event & evt);
+    bool opticalfilter(size_t ipf, const std::vector<recob::PFParticle> & pfparticles, const art::Event & evt);
 
+    double trackEnergy(const art::Ptr<recob::Track>&, const art::Event & evt);
     double distance(double a[3], double b[3]);
 
 };
@@ -138,8 +140,60 @@ bool ElectronFilterPandora::is_fiducial(double x[3]) const
     return is_x && is_y && is_z;
 }
 
+double ElectronFilterPandora::trackEnergy(const art::Ptr<recob::Track>& track, const art::Event & evt)
+{
+    art::InputTag pandoraNu_tag { "pandoraNu" };
+    auto const& track_handle = evt.getValidHandle< std::vector< recob::Track > >( pandoraNu_tag );
+    art::FindManyP<anab::Calorimetry> calo_track_ass(track_handle, evt, "pandoraNucalo");
+    const std::vector<art::Ptr<anab::Calorimetry>> calos = calo_track_ass.at(track->ID());
+    double E = 0;
+    double Eapprox =0;
+
+    for (size_t ical = 0; ical<calos.size(); ++ical)
+    {
+        if (E!=0) continue;
+        if (!calos[ical]) continue;
+        if (!calos[ical]->PlaneID().isValid) continue;
+        int planenum = calos[ical]->PlaneID().Plane;
+        if (planenum<0||planenum>2) continue;
+        if (planenum != 2) continue;                           // Use informartion from collection plane only
+
+        // Understand if the calo module flipped the track
+        //double dqdx_start = (calos[ical]->dQdx())[0] + (calos[ical]->dQdx())[1] + (calos[ical]->dQdx())[2];
+        //double dqdx_end   = (calos[ical]->dQdx())[calos[ical]->dQdx().size()-1] + (calos[ical]->dQdx())[calos[ical]->dQdx().size()-2] + (calos[ical]->dQdx())[calos[ical]->dQdx().size()-3];
+        //bool caloFlippedTrack = dqdx_start < dqdx_end;
+
+        double mean=0;
+        double dedx=0;
+        double prevresrange=0;
+
+        if(calos[ical]->ResidualRange()[0] > track->Length()/2)
+        {
+            prevresrange=track->Length();
+        }
+
+        double currentresrange=0;
+
+        for(size_t iTrkHit = 0; iTrkHit < calos[ical]->dEdx().size(); ++iTrkHit)
+        {
+            dedx = calos[ical]->dEdx()[iTrkHit];
+            currentresrange = calos[ical]->ResidualRange()[iTrkHit];
+            if(dedx>0 && dedx<10)
+            {
+                std::cout << dedx << "\t" << currentresrange << "\t"<< prevresrange<<std::endl;
+                mean+=dedx;
+                E+=dedx*abs(prevresrange-currentresrange);
+                prevresrange=currentresrange;
+            }
+        }
+        //std::cout << "Length: " << track->Length() << "and Energy approximation is " << mean/calos[ical]->dEdx().size()*track->Length()<< "MeV"<<std::endl;
+        Eapprox = mean/calos[ical]->dEdx().size()*track->Length();
+    }
+    return Eapprox;
+}
+
 // Method that returns a map of all spacepoints and their deposited charge for a PFP, asks for the index of the pfp
-void ElectronFilterPandora::spacepointchargecollector(size_t ipf, std::map< art::Ptr<recob::SpacePoint>, double > & map_spacepoint_weight,const std::vector<recob::PFParticle> & pfparticles,art::Event & evt)
+void ElectronFilterPandora::spacepointchargecollector(size_t ipf, std::map< art::Ptr<recob::SpacePoint>, double > & map_spacepoint_weight,const std::vector<recob::PFParticle> & pfparticles,const art::Event & evt)
 {
 
     art::InputTag pandoraNu_tag { "pandoraNu" };
@@ -172,7 +226,7 @@ void ElectronFilterPandora::spacepointchargecollector(size_t ipf, std::map< art:
 }
 
 // Method to calculate the total the center for a parent particle (index of neutrino pfp)
-void ElectronFilterPandora::chargecentrePFP(size_t ipf, std::vector<double> & chargecenter,const std::vector<recob::PFParticle> & pfparticles,art::Event & evt)
+void ElectronFilterPandora::chargecentrePFP(size_t ipf, std::vector<double> & chargecenter,const std::vector<recob::PFParticle> & pfparticles,const art::Event & evt)
 {
     double totalweight=0;
     std::map< art::Ptr<recob::SpacePoint>, double > map_spacepoint_weight;
@@ -193,7 +247,7 @@ void ElectronFilterPandora::chargecentrePFP(size_t ipf, std::vector<double> & ch
     chargecenter[2]/=totalweight;
 }
 
-bool ElectronFilterPandora::opticalfilter(size_t ipf, const std::vector<recob::PFParticle> & pfparticles,art::Event & evt)
+bool ElectronFilterPandora::opticalfilter(size_t ipf, const std::vector<recob::PFParticle> & pfparticles,const art::Event & evt)
 {
     bool pass = false;
 
@@ -297,6 +351,8 @@ bool ElectronFilterPandora::filter(art::Event & evt)
 
                     if (track_obj->Length() < m_trackLength) tracks++;
                     h_track_length->Fill(track_obj->Length());
+
+                    //std::cout<< "Energy of the track: " << trackEnergy(track_obj,evt) << "Mev" << std::endl;
                 }
 
             } // end for pfparticle daughters
